@@ -3,7 +3,9 @@
     .venv/bin/streamlit run scripts/webui.py
 
 Two modes:
-- Single video: one clip through any model (mock / fal / self-hosted) + color post-processing.
+- Single video: one clip through a fal-ai model + color post-processing. Self-hosted models are
+  not offered here: a single clip cannot be batched, so the GPU sits idle between forwards. Run
+  self-hosted models through the batch queue instead, where frames are packed across videos.
 - Batch queue: many clips drained through ONE GPU-saturating self-hosted run. Batch size is
   calibrated to ~90% of VRAM, so frames from different videos share each forward (cross-video
   batching). Uploading more clips just lengthens the queue.
@@ -19,38 +21,16 @@ bootstrap()
 
 import streamlit as st
 
-from video_super_resolution.local import LOCAL_PROVIDERS, realesrgan_is_cached, run_batch_queue
+from video_super_resolution.local import run_batch_queue
 from video_super_resolution.postprocess import ColorConfig
 from video_super_resolution.providers import PROVIDERS
-from video_super_resolution.webui import WEBUI_MODELS, estimate_cost, run_upscale
+from video_super_resolution.webui import estimate_cost, run_upscale
 
 COLOR_METHODS = ["none", "wavelet", "reinhard", "adain", "histogram"]
 SCALES = {"1.5x": 1.5, "2x": 2.0}
-FAL_MODELS = set(PROVIDERS)
 
 st.set_page_config(page_title="QLAN VSR", layout="wide")
 st.title("720p -> 1080p/2K neural upscaling")
-
-
-def _local_controls(model: str) -> dict:
-    if model == "realesrgan-local":
-        cached = realesrgan_is_cached("RealESRGAN_x2plus")
-        st.caption(("weights cached" if cached else "weights download on first run")
-                   + " · RealESRGAN_x2plus")
-        return {
-            "tile": st.slider("Tile size (px, 0 = whole frame)", 0, 1024, 256, 32),
-            "tile_pad": st.slider("Tile padding (px)", 0, 32, 10),
-            "half": st.checkbox("fp16 (saves VRAM)", value=True),
-        }
-    st.warning("SeedVR2-3B targets a large GPU (~18 GB+); on a small GPU it fails the VRAM "
-               "preflight before downloading. Use realesrgan-local here.")
-    return {
-        "variant": st.selectbox("Variant", ["3B", "7B"], index=0),
-        "batch": st.slider("Temporal batch (4n+1)", 1, 25, 5),
-        "temporal_overlap": st.slider("Temporal overlap (frames)", 0, 16, 4),
-        "tile": st.slider("Spatial tile (px, 0 = whole frame)", 0, 2048, 0, 64),
-        "download": st.checkbox("Allow multi-GB weight download", value=False),
-    }
 
 
 def _progress_handlers():
@@ -86,21 +66,14 @@ def _build_batch_jobs(uploads, work: Path, out_h: int) -> list[dict]:
 
 def single_video_ui() -> None:
     with st.sidebar:
-        model = st.selectbox("Model", list(WEBUI_MODELS), index=0)
+        model = st.selectbox("Model", list(PROVIDERS), index=0)
         scale_label = st.selectbox("Scale", list(SCALES), index=0)
         color_method = st.selectbox("Color correction", COLOR_METHODS, index=1)
         strength = st.slider("Correction strength", 0.0, 1.0, 1.0, 0.05,
                              disabled=color_method == "none")
         wavelet_levels = st.slider("Wavelet levels", 1, 7, 5, disabled=color_method != "wavelet")
-        provider_kwargs: dict = {}
-        if model in LOCAL_PROVIDERS:
-            st.divider()
-            st.subheader("Self-hosted")
-            provider_kwargs = _local_controls(model)
-        allow_spend = False
-        if model in FAL_MODELS:
-            allow_spend = st.checkbox(f"Authorize fal spend for `{model}`", value=False)
-            st.warning("Real fal model: this spends credits.")
+        allow_spend = st.checkbox(f"Authorize fal spend for `{model}`", value=False)
+        st.warning("Real fal model: this spends credits.")
 
     uploaded = st.file_uploader("Upload a 720p clip", type=["mp4", "mov", "mkv", "webm"])
     if uploaded is None:
@@ -112,9 +85,7 @@ def single_video_ui() -> None:
     out_h += out_h % 2
     try:
         est = estimate_cost(model, src, out_h)
-        kind = ("fal" if model in FAL_MODELS else
-                "self-hosted GPU" if model in LOCAL_PROVIDERS else "offline")
-        st.info(f"Target height {out_h}px · estimated cost ${est:.3f} ({kind})")
+        st.info(f"Target height {out_h}px · estimated cost ${est:.3f} (fal)")
     except Exception as exc:  # noqa: BLE001 - bad upload, surface it
         st.error(f"Could not read the clip: {exc}")
         return
@@ -124,8 +95,7 @@ def single_video_ui() -> None:
     color = ColorConfig(method=color_method, strength=strength, wavelet_levels=wavelet_levels)
     bar, status, cb = _progress_handlers()
     try:
-        res = run_upscale(src, model, out_h, color, work, allow_spend=allow_spend,
-                          provider_kwargs=provider_kwargs, progress=cb)
+        res = run_upscale(src, model, out_h, color, work, allow_spend=allow_spend, progress=cb)
     except RuntimeError as exc:
         st.error(str(exc))
         return
