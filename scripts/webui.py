@@ -121,8 +121,9 @@ def single_video_ui() -> None:
 
 
 def batch_queue_ui() -> None:
-    st.caption("All clips drain through one GPU-saturating run; batch size is calibrated to ~90% "
-               "VRAM, mixing frames across videos. Full model + post-processing config below.")
+    st.caption("Real-ESRGAN: clips drain through one run, batch calibrated to ~90% VRAM (frames mixed "
+               "across videos). SeedVR2: GGUF + block-swap fit the diffusion model on a small GPU "
+               "(low VRAM, swap-bound). Config below.")
     with st.sidebar:
         model = st.selectbox("Model", ["realesrgan", "seedvr2"], index=0)
         scale_label = st.selectbox("Scale", list(SCALES), index=0)
@@ -144,12 +145,20 @@ def batch_queue_ui() -> None:
                 "tile_pad": st.slider("Tile padding (px)", 0, 64, 10),
             }
         else:
-            st.warning("SeedVR2 targets a large GPU; on a small GPU it fails the VRAM preflight.")
+            st.caption("GGUF + block-swap fit the 3B model on a small GPU. Fewer swapped blocks and a "
+                       "larger VAE tile use more VRAM and run faster (less CPU<->GPU copying); on the "
+                       "140 GB GPU set blocks_to_swap=0 and vae_tile=0.")
             sv = {
                 "variant": st.selectbox("Variant", ["3B", "7B"], index=0),
-                "temporal_batch": st.slider("Temporal window (4n+1)", 1, 25, 5),
-                "temporal_overlap": st.slider("Temporal overlap", 0, 16, 2),
-                "download": st.checkbox("Allow multi-GB weight download", value=False),
+                "temporal_batch": st.slider("Temporal window (4n+1)", 1, 25, 5,
+                                            help="Larger = better temporal coherence, more VRAM"),
+                "blocks_to_swap": st.slider("Blocks to swap to CPU (0 = keep all on GPU)", 0, 36, 32,
+                                            help="Lower = more VRAM used, faster. 6 GB needs ~32"),
+                "vae_tile": st.slider("VAE tile (px, 0 = whole frame)", 0, 1024, 256, 64,
+                                      help="Larger = more VRAM, fewer tiles, faster"),
+                "attention_mode": st.selectbox(
+                    "Attention", ["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
+                    index=0, help="flash/sage need the kernel installed on the host; else falls back to sdpa"),
             }
     out_h = int(720 * SCALES[scale_label])
     out_h += out_h % 2

@@ -132,6 +132,33 @@ def test_unique_jobs_dedupes_duplicate_names():
     assert [j["name"] for j in uniq] == ["clip", "clip_2"]
 
 
+def test_seedvr2_variant_maps_to_gguf():
+    assert local_provider._SEEDVR2_GGUF["3B"].endswith("3b-Q4_K_M.gguf")
+    assert local_provider._SEEDVR2_GGUF["7B"].endswith("7b-Q4_K_M.gguf")
+
+
+def test_resolve_model_dir_prefers_populated(tmp_path, monkeypatch):
+    from video_super_resolution.serving import seedvr2_comfy as sv
+
+    monkeypatch.delenv("SEEDVR2_MODEL_DIR", raising=False)
+    empty, populated = tmp_path / "empty", tmp_path / "have"
+    empty.mkdir()
+    populated.mkdir()
+    (populated / "ema_vae_fp16.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(sv, "_MODEL_DIR_CANDIDATES", [empty, populated])
+    assert sv.resolve_model_dir() == populated
+    assert sv.resolve_model_dir(tmp_path / "explicit") == tmp_path / "explicit"
+
+
+def test_resolve_repo_dir_errors_when_missing(tmp_path, monkeypatch):
+    from video_super_resolution.serving import seedvr2_comfy as sv
+
+    monkeypatch.delenv("SEEDVR2_COMFY_REPO", raising=False)
+    monkeypatch.setattr(sv, "_REPO_CANDIDATES", [tmp_path / "nope"])
+    with pytest.raises(RuntimeError, match="ComfyUI-SeedVR2"):
+        sv.resolve_repo_dir()
+
+
 # ---------------- GPU / on-prem (skipped without hardware) ----------------
 def test_seedvr2_vram_guard_fails_fast():
     if not _cuda_onprem():

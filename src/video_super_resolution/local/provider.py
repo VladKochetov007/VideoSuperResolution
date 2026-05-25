@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[3]
 _RE_WORKER = ROOT / "src" / "video_super_resolution" / "local" / "realesrgan_worker.py"
 _SV_WORKER = ROOT / "src" / "video_super_resolution" / "local" / "seedvr2_worker.py"
 _SERVE = ROOT / "scripts" / "serve_batch.py"
+_SERVE_SV = ROOT / "scripts" / "serve_seedvr2.py"
+_SEEDVR2_GGUF = {"3B": "seedvr2_ema_3b-Q4_K_M.gguf", "7B": "seedvr2_ema_7b-Q4_K_M.gguf"}
 
 ProgressCb = Callable[[str, float | None, str], None]
 
@@ -142,25 +144,36 @@ def run_batch_queue(jobs: list[dict], out_dir: Path, progress: ProgressCb | None
                     fp32: bool = False, vram_gb: float = 0.0, tile: int = 0,
                     tile_pad: int = 10, variant: str = "3B",
                     temporal_batch: int = 5, temporal_overlap: int = 2,
-                    download: bool = False) -> list[dict]:
-    """Drain a QUEUE of videos through one GPU-saturating batched run (cross-video batching, batch
-    size calibrated to ~90% VRAM). `jobs` = [{input, out_h, name}]. Fully configurable: model, color
-    post-processing, batch cap, fp16, SeedVR2 windowing. Returns finished videos as
-    [{video_id, frames, out_path}]. The heavy run happens in .venv-onprem via serve_batch.py.
+                    download: bool = False, blocks_to_swap: int = 32, vae_tile: int = 256,
+                    attention_mode: str = "sdpa") -> list[dict]:
+    """Drain a QUEUE of videos through one GPU-saturating run. `jobs` = [{input, out_h, name}].
+
+    Real-ESRGAN runs through serve_batch.py with cross-video batching calibrated to ~90% VRAM.
+    SeedVR2 runs through serve_seedvr2.py (the ComfyUI-SeedVR2 core): GGUF + block-swap let the 3B
+    diffusion model fit a small GPU, and its own pipeline owns the temporal batching. Returns
+    finished videos as [{video_id, frames, out_path}]. Both run in .venv-onprem.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = out_dir / "manifest.json"
     manifest.write_text(json.dumps(jobs))
-    cmd = [str(onprem_python()), str(_SERVE), "--manifest", str(manifest), "--out-dir", str(out_dir),
-           "--model", model, "--headroom", str(headroom), "--max-batch", str(max_batch),
-           "--vram-gb", str(vram_gb), "--color", color, "--color-strength", str(color_strength),
-           "--wavelet-levels", str(wavelet_levels), "--tile", str(tile),
-           "--tile-pad", str(tile_pad), "--variant", variant,
-           "--temporal-batch", str(temporal_batch), "--temporal-overlap", str(temporal_overlap)]
-    if fp32:
-        cmd.append("--fp32")
-    if download:
-        cmd.append("--download")
+    if model == "seedvr2":
+        cmd = [str(onprem_python()), str(_SERVE_SV), "--manifest", str(manifest),
+               "--out-dir", str(out_dir), "--dit-model", _SEEDVR2_GGUF.get(variant, variant),
+               "--batch-size", str(temporal_batch), "--blocks-to-swap", str(blocks_to_swap),
+               "--vae-tile", str(vae_tile), "--attention-mode", attention_mode,
+               "--color", color, "--color-strength", str(color_strength),
+               "--wavelet-levels", str(wavelet_levels)]
+    else:
+        cmd = [str(onprem_python()), str(_SERVE), "--manifest", str(manifest), "--out-dir", str(out_dir),
+               "--model", model, "--headroom", str(headroom), "--max-batch", str(max_batch),
+               "--vram-gb", str(vram_gb), "--color", color, "--color-strength", str(color_strength),
+               "--wavelet-levels", str(wavelet_levels), "--tile", str(tile),
+               "--tile-pad", str(tile_pad), "--variant", variant,
+               "--temporal-batch", str(temporal_batch), "--temporal-overlap", str(temporal_overlap)]
+        if fp32:
+            cmd.append("--fp32")
+        if download:
+            cmd.append("--download")
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             bufsize=1)
@@ -185,5 +198,5 @@ def run_batch_queue(jobs: list[dict], out_dir: Path, progress: ProgressCb | None
             error = line[6:]
     proc.wait()
     if proc.returncode != 0 or error:
-        raise RuntimeError(error or f"serve_batch exited {proc.returncode}")
+        raise RuntimeError(error or f"{Path(cmd[1]).name} exited {proc.returncode}")
     return videos
